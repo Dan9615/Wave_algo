@@ -27,7 +27,12 @@ from wave_algo.models import (
     TradeSignal,
     normalize_direction,
 )
-from wave_algo.pivots import ZigZagParams, detect_pivots
+from wave_algo.pivots import (
+    PivotConfirmation,
+    ZigZagParams,
+    detect_pivot_confirmations,
+    detect_pivots,
+)
 from wave_algo.rules import validate_wave_1_to_2, validate_wave_1_to_4
 from wave_algo.scoring import calculate_score, fib_fit_score, htf_alignment_score
 
@@ -354,11 +359,29 @@ def _window_ends(pivot_count: int, window_size: int, scan_all: bool) -> range:
     return range(pivot_count, pivot_count + 1)
 
 
-def _base_generation_params(params: ZigZagParams) -> dict[str, Any]:
+def _base_generation_params(params: ZigZagParams, *, generation_mode: str) -> dict[str, Any]:
     return {
         "generated_from_ohlcv": True,
+        "generation_mode": generation_mode,
         "pivot_params": asdict(params),
     }
+
+
+def _timestamp_column_from_params(params: dict[str, Any]) -> str:
+    pivot_params = params.get("pivot_params", {})
+    return str(pivot_params.get("timestamp_column", "timestamp"))
+
+
+def _signal_time_at(df: pd.DataFrame, row_index: int, params: ZigZagParams) -> Any:
+    return df.iloc[row_index][params.timestamp_column]
+
+
+def _confirmed_pivots(confirmations: Sequence[PivotConfirmation]) -> tuple[Pivot, ...]:
+    return tuple(confirmation.pivot for confirmation in confirmations)
+
+
+def _window_confirmation_index(confirmations: Sequence[PivotConfirmation]) -> int:
+    return max(confirmation.confirmation_index for confirmation in confirmations)
 
 
 def _signal_sort_key(signal: TradeSignal) -> tuple[int, str, str]:
@@ -394,12 +417,15 @@ def _first_triangle_breakout(
     direction: Direction,
     htf_state: HTFState | str | None,
     params: dict[str, Any],
+    start_index: int | None = None,
 ) -> TradeSignal | None:
     p_e = pivots[-1]
-    if p_e.index + 1 >= len(df):
+    first_breakout_index = max(p_e.index + 1, start_index or p_e.index + 1)
+    if first_breakout_index >= len(df):
         return None
 
-    for row_index in range(p_e.index + 1, len(df)):
+    timestamp_column = _timestamp_column_from_params(params)
+    for row_index in range(first_breakout_index, len(df)):
         row = df.iloc[row_index]
         signal = calculate_triangle_signal(
             pivots,
@@ -413,14 +439,14 @@ def _first_triangle_breakout(
                 "signal_index": row_index,
                 "breakout_index": row_index,
             },
-            signal_time=row["timestamp"],
+            signal_time=row[timestamp_column],
         )
         if signal is not None:
             return signal
     return None
 
 
-def generate_signals_from_ohlcv(
+def _generate_signals_from_full_ohlcv(
     df: pd.DataFrame,
     *,
     symbol: str,
@@ -440,7 +466,7 @@ def generate_signals_from_ohlcv(
     params = pivot_params or ZigZagParams()
     pivots = detect_pivots(df, params)
     generated: list[TradeSignal] = []
-    base_params = _base_generation_params(params)
+    base_params = _base_generation_params(params, generation_mode="full_frame")
     requested_directions = _direction_list(direction, directions)
 
     for candidate_direction in requested_directions:
@@ -483,3 +509,129 @@ def generate_signals_from_ohlcv(
                 generated.append(triangle)
 
     return _dedupe_signals(generated)
+
+
+def _generate_signals_point_in_time(
+    df: pd.DataFrame,
+    *,
+    symbol: str,
+    timeframe: str,
+    direction: Direction | str | None,
+    directions: Sequence[Direction | str] | None,
+    htf_state: HTFState | str | None,
+    pivot_params: ZigZagParams | None,
+    scan_all: bool,
+) -> list[TradeSignal]:
+    params = pivot_params or ZigZagParams()
+    data = df.reset_index(drop=True).copy()
+    confirmations = detect_pivot_confirmations(
+        data,
+        params,
+        include_unconfirmed_terminal=False,
+    )
+    generated: list[TradeSignal] = []
+    base_params = _base_generation_params(params, generation_mode="point_in_time")
+    requested_directions = _direction_list(direction, directions)
+
+    for candidate_direction in requested_directions:
+        for end in _window_ends(len(confirmations), 3, scan_all):
+            window_confirmations = confirmations[end - 3 : end]
+            window = _confirmed_pivots(window_confirmations)
+            signal_index = _window_confirmation_index(window_confirmations)
+            wave3 = calculate_wave3_signal(
+                window,
+                symbol=symbol,
+                timeframe=timeframe,
+                direction=candidate_direction,
+                htf_state=htf_state,
+                params={
+                    **base_params,
+                    "signal_index": signal_index,
+                    "confirmation_index": signal_index,
+                    "last_pivot_index": window[-1].index,
+                },
+                signal_time=_signal_time_at(data, signal_index, params),
+            )
+            if wave3 is not None:
+                generated.append(wave3)
+
+        for end in _window_ends(len(confirmations), 5, scan_all):
+            window_confirmations = confirmations[end - 5 : end]
+            window = _confirmed_pivots(window_confirmations)
+            signal_index = _window_confirmation_index(window_confirmations)
+            window_params = {
+                **base_params,
+                "signal_index": signal_index,
+                "confirmation_index": signal_index,
+                "last_pivot_index": window[-1].index,
+            }
+            wave5 = calculate_wave5_signal(
+                window,
+                symbol=symbol,
+                timeframe=timeframe,
+                direction=candidate_direction,
+                htf_state=htf_state,
+                params=window_params,
+                signal_time=_signal_time_at(data, signal_index, params),
+            )
+            if wave5 is not None:
+                generated.append(wave5)
+
+            triangle = _first_triangle_breakout(
+                data,
+                window,
+                symbol=symbol,
+                timeframe=timeframe,
+                direction=candidate_direction,
+                htf_state=htf_state,
+                params=window_params,
+                start_index=signal_index,
+            )
+            if triangle is not None:
+                generated.append(triangle)
+
+    return _dedupe_signals(generated)
+
+
+def generate_signals_from_ohlcv(
+    df: pd.DataFrame,
+    *,
+    symbol: str,
+    timeframe: str,
+    direction: Direction | str | None = None,
+    directions: Sequence[Direction | str] | None = None,
+    htf_state: HTFState | str | None = None,
+    pivot_params: ZigZagParams | None = None,
+    scan_all: bool = True,
+    point_in_time: bool = True,
+) -> list[TradeSignal]:
+    """Detect pivots and return deterministic candidate signals from OHLCV.
+
+    Point-in-time generation is the default backtest-safe mode: only confirmed
+    pivot windows are used, and Wave 3/Wave 5 signal timestamps are the bar
+    where the window became knowable. ``point_in_time=False`` preserves the
+    old full-frame diagnostic scanner and may assign signals to historical
+    pivot bars after using later data to find those pivots.
+    """
+
+    if not point_in_time:
+        return _generate_signals_from_full_ohlcv(
+            df,
+            symbol=symbol,
+            timeframe=timeframe,
+            direction=direction,
+            directions=directions,
+            htf_state=htf_state,
+            pivot_params=pivot_params,
+            scan_all=scan_all,
+        )
+    return _generate_signals_point_in_time(
+        df,
+        symbol=symbol,
+        timeframe=timeframe,
+        direction=direction,
+        directions=directions,
+        htf_state=htf_state,
+        pivot_params=pivot_params,
+        scan_all=scan_all,
+    )

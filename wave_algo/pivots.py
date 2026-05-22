@@ -34,6 +34,16 @@ class ZigZagParams:
             raise ValueError("min_bars_between_pivots cannot be negative")
 
 
+@dataclass(frozen=True)
+class PivotConfirmation:
+    """A pivot plus the bar where that pivot became knowable."""
+
+    pivot: Pivot
+    confirmation_index: int
+    confirmation_time: Any
+    confirmed: bool = True
+
+
 def validate_ohlcv(df: pd.DataFrame, timestamp_column: str | None = "timestamp") -> None:
     """Validate the OHLCV schema expected by the first-milestone engine."""
 
@@ -97,20 +107,43 @@ def _make_pivot(
     )
 
 
-def _append_pivot(pivots: list[Pivot], pivot: Pivot) -> None:
-    if not pivots:
-        pivots.append(pivot)
+def _make_confirmation(
+    df: pd.DataFrame,
+    index: int,
+    price: float,
+    kind: PivotKind,
+    atr: float,
+    params: ZigZagParams,
+    *,
+    confirmation_index: int,
+    confirmed: bool = True,
+) -> PivotConfirmation:
+    return PivotConfirmation(
+        pivot=_make_pivot(df, index, price, kind, atr, params),
+        confirmation_index=int(confirmation_index),
+        confirmation_time=_row_time(df, int(confirmation_index), params.timestamp_column),
+        confirmed=confirmed,
+    )
+
+
+def _append_confirmation(
+    confirmations: list[PivotConfirmation],
+    confirmation: PivotConfirmation,
+) -> None:
+    if not confirmations:
+        confirmations.append(confirmation)
         return
 
-    previous = pivots[-1]
+    previous = confirmations[-1].pivot
+    pivot = confirmation.pivot
     if previous.kind != pivot.kind:
-        pivots.append(pivot)
+        confirmations.append(confirmation)
         return
 
     if pivot.kind is PivotKind.HIGH and pivot.price > previous.price:
-        pivots[-1] = pivot
+        confirmations[-1] = confirmation
     if pivot.kind is PivotKind.LOW and pivot.price < previous.price:
-        pivots[-1] = pivot
+        confirmations[-1] = confirmation
 
 
 def _passes_filters(
@@ -141,12 +174,19 @@ def _passes_final_distance(
     return candidate_index - previous_index >= params.min_bars_between_pivots
 
 
-def detect_pivots(df: pd.DataFrame, params: ZigZagParams | None = None) -> list[Pivot]:
-    """Detect deterministic ZigZag pivots from OHLCV data.
+def detect_pivot_confirmations(
+    df: pd.DataFrame,
+    params: ZigZagParams | None = None,
+    *,
+    include_unconfirmed_terminal: bool = True,
+) -> list[PivotConfirmation]:
+    """Detect ZigZag pivots with the bar where each pivot became knowable.
 
     The algorithm confirms a swing only after price reverses by the larger of the
     configured percentage threshold and ATR threshold, with a minimum bar distance
-    between the swing extreme and both adjacent confirmation points.
+    between the swing extreme and both adjacent confirmation points. The optional
+    terminal pivot preserves the historical full-frame ZigZag view, but is marked
+    as unconfirmed because no later reversal bar confirmed it.
     """
 
     params = params or ZigZagParams()
@@ -159,7 +199,7 @@ def detect_pivots(df: pd.DataFrame, params: ZigZagParams | None = None) -> list[
     highs = data["high"].astype(float).to_numpy()
     lows = data["low"].astype(float).to_numpy()
 
-    pivots: list[Pivot] = []
+    confirmations: list[PivotConfirmation] = []
     trend: str | None = None
     highest_index = lowest_index = 0
     highest_price = float(highs[0])
@@ -189,15 +229,16 @@ def detect_pivots(df: pd.DataFrame, params: ZigZagParams | None = None) -> list[
                 up_threshold,
                 params,
             ):
-                _append_pivot(
-                    pivots,
-                    _make_pivot(
+                _append_confirmation(
+                    confirmations,
+                    _make_confirmation(
                         data,
                         lowest_index,
                         lowest_price,
                         PivotKind.LOW,
                         atr[lowest_index],
                         params,
+                        confirmation_index=highest_index,
                     ),
                 )
                 trend = "up"
@@ -210,15 +251,16 @@ def detect_pivots(df: pd.DataFrame, params: ZigZagParams | None = None) -> list[
                 down_threshold,
                 params,
             ):
-                _append_pivot(
-                    pivots,
-                    _make_pivot(
+                _append_confirmation(
+                    confirmations,
+                    _make_confirmation(
                         data,
                         highest_index,
                         highest_price,
                         PivotKind.HIGH,
                         atr[highest_index],
                         params,
+                        confirmation_index=lowest_index,
                     ),
                 )
                 trend = "down"
@@ -239,15 +281,16 @@ def detect_pivots(df: pd.DataFrame, params: ZigZagParams | None = None) -> list[
                 threshold,
                 params,
             ):
-                _append_pivot(
-                    pivots,
-                    _make_pivot(
+                _append_confirmation(
+                    confirmations,
+                    _make_confirmation(
                         data,
                         highest_index,
                         highest_price,
                         PivotKind.HIGH,
                         atr[highest_index],
                         params,
+                        confirmation_index=index,
                     ),
                 )
                 trend = "down"
@@ -268,15 +311,16 @@ def detect_pivots(df: pd.DataFrame, params: ZigZagParams | None = None) -> list[
                 threshold,
                 params,
             ):
-                _append_pivot(
-                    pivots,
-                    _make_pivot(
+                _append_confirmation(
+                    confirmations,
+                    _make_confirmation(
                         data,
                         lowest_index,
                         lowest_price,
                         PivotKind.LOW,
                         atr[lowest_index],
                         params,
+                        confirmation_index=index,
                     ),
                 )
                 trend = "up"
@@ -285,29 +329,64 @@ def detect_pivots(df: pd.DataFrame, params: ZigZagParams | None = None) -> list[
                 highest_price = high
 
     if (
-        trend == "up"
-        and (not pivots or pivots[-1].index != highest_index)
+        include_unconfirmed_terminal
+        and trend == "up"
+        and (not confirmations or confirmations[-1].pivot.index != highest_index)
         and _passes_final_distance(previous_pivot_index, highest_index, params)
     ):
-        _append_pivot(
-            pivots,
-            _make_pivot(
+        _append_confirmation(
+            confirmations,
+            _make_confirmation(
                 data,
                 highest_index,
                 highest_price,
                 PivotKind.HIGH,
                 atr[highest_index],
                 params,
+                confirmation_index=len(data) - 1,
+                confirmed=False,
             ),
         )
     if (
-        trend == "down"
-        and (not pivots or pivots[-1].index != lowest_index)
+        include_unconfirmed_terminal
+        and trend == "down"
+        and (not confirmations or confirmations[-1].pivot.index != lowest_index)
         and _passes_final_distance(previous_pivot_index, lowest_index, params)
     ):
-        _append_pivot(
-            pivots,
-            _make_pivot(data, lowest_index, lowest_price, PivotKind.LOW, atr[lowest_index], params),
+        _append_confirmation(
+            confirmations,
+            _make_confirmation(
+                data,
+                lowest_index,
+                lowest_price,
+                PivotKind.LOW,
+                atr[lowest_index],
+                params,
+                confirmation_index=len(data) - 1,
+                confirmed=False,
+            ),
         )
 
-    return [pivot for pivot in pivots if np.isfinite(pivot.price)]
+    return [
+        confirmation
+        for confirmation in confirmations
+        if np.isfinite(confirmation.pivot.price)
+    ]
+
+
+def detect_pivots(
+    df: pd.DataFrame,
+    params: ZigZagParams | None = None,
+    *,
+    include_unconfirmed_terminal: bool = True,
+) -> list[Pivot]:
+    """Detect deterministic ZigZag pivots from OHLCV data."""
+
+    return [
+        confirmation.pivot
+        for confirmation in detect_pivot_confirmations(
+            df,
+            params,
+            include_unconfirmed_terminal=include_unconfirmed_terminal,
+        )
+    ]

@@ -140,7 +140,8 @@ return TradeSignal(
 ### 2. Signatures
 - Data loader: `load_ohlcv(symbol: str, timeframe: str, data_dir: str | Path) -> DataFrame`.
 - Signal generation: `generate_signals_from_ohlcv(df, *, symbol, timeframe, direction=None,
-  directions=None, htf_state=None, pivot_params=None, scan_all=True) -> list[TradeSignal]`.
+  directions=None, htf_state=None, pivot_params=None, scan_all=True,
+  point_in_time=True) -> list[TradeSignal]`.
 - Backtest: `run_backtest(market_data, signals, *, threshold=70.0, config=None)`.
 - CLI command: `wave-algo backtest --data-dir data/ohlcv --symbols BTCUSDT,ETHUSDT,SOLUSDT
   --timeframes 1h --thresholds 60,70,80`.
@@ -148,6 +149,18 @@ return TradeSignal(
 ### 3. Contracts
 - Local OHLCV files use `data/ohlcv/{symbol}_{timeframe}.parquet`.
 - Required columns are `timestamp`, `open`, `high`, `low`, `close`, and `volume`.
+- Treat `timestamp` as the bar-open time. Completion checks for higher timeframes should
+  add the timeframe duration and include only bars whose end time is at or before the
+  signal timestamp.
+- OHLCV-generated signals must be point-in-time safe by default. The default scanner must
+  use confirmed pivot windows only and must not assign Wave 3/Wave 5 signal timestamps
+  earlier than the latest pivot-confirmation bar in the candidate window.
+- Triangle signals generated from OHLCV must not scan for breakouts before the full
+  five-pivot window is confirmed; the signal timestamp is the breakout bar.
+- A full-frame OHLCV scanner may exist only as an explicit diagnostic opt-out such as
+  `point_in_time=False`, and generated signals must identify that mode in params (for
+  example `generation_mode="full_frame"`). CLI backtests must use the point-in-time path
+  by default.
 - Backtest fills use signal bar close for eligibility and next-bar open for entry.
 - Active trades only free symbol/portfolio capacity after exits strictly before a new
   candidate entry timestamp. Same-bar intrabar exits must not free capacity for another
@@ -165,6 +178,8 @@ return TradeSignal(
 - Signal below threshold -> skipped with `below_confidence_threshold`.
 - Signal with no next bar -> skipped with `no_next_bar_for_entry`.
 - Invalid entry/stop geometry -> skipped with `invalid_stop_for_entry`.
+- Adding future bars must not create or change signal timestamps at or before the previous
+  frame end when `point_in_time=True`.
 
 ### 5. Good/Base/Bad Cases
 - Good: candidate signal has a next bar, valid risk distance, and exits by stop, target, or
@@ -176,6 +191,9 @@ return TradeSignal(
 ### 6. Tests Required
 - Loader schema, missing-file, and bad-type tests.
 - OHLCV-generated Wave 3, Wave 5, and triangle candidate tests.
+- Regression tests for point-in-time signal generation: prefix-generated signals must match
+  the full-frame signals whose `signal_time` is at or before the prefix end, and Wave
+  3/Wave 5 signal indexes must equal the latest source pivot confirmation index.
 - Backtest tests for next-open entries, stop-first same-bar collision, fees/slippage, sizing
   constraints, partial exits, breakeven stops, time stops, same-open ordering, and portfolio
   limits.
@@ -199,4 +217,88 @@ signals = generate_signals_from_ohlcv(
     pivot_params=ZigZagParams(reversal_pct=0.03),
 )
 result = run_backtest({("BTCUSDT", "1h"): df}, signals, threshold=70.0)
+```
+
+## Scenario: Higher-Timeframe Elliott Wave Filter MVP
+
+### 1. Scope / Trigger
+- Trigger: Milestone 3 optional 4h/daily Parquet loading, HTF state inference, signal
+  filtering, and CLI diagnostics.
+
+### 2. Signatures
+- HTF state from pivots: `infer_htf_state_from_pivots(pivots, timeframe=None) -> HTFState`.
+- HTF state from OHLCV: `infer_htf_state_from_ohlcv(df, *, timeframe=None,
+  pivot_params=None) -> HTFState`.
+- Optional context loader: `load_htf_context(symbol, data_dir, *, alignment_timeframe="4h",
+  veto_timeframes=("1d", "daily"), pivot_params=None) -> HTFContext`.
+- Signal filter: `filter_signals_by_htf(signals, contexts, *, alignment_timeframe="4h")
+  -> HTFFilterResult`.
+- CLI default: `wave-algo backtest` applies HTF filtering unless `--no-htf-filter` is passed.
+
+### 3. Contracts
+- Optional HTF files use the same local contract: `data/ohlcv/{symbol}_{timeframe}.parquet`.
+- The 4h alignment timeframe is required for filtered signals. Long requires 4h `bullish`;
+  short requires 4h `bearish`.
+- Daily/1d is a veto only. Daily `bearish` blocks long; daily `bullish` blocks short; daily
+  `neutral` or unavailable does not block if 4h aligns.
+- HTF state inference is bounded: use deterministic pivots and latest hard-rule validator
+  windows (`validate_impulse`, `validate_wave_1_to_4`, then `validate_wave_1_to_2`). Do not
+  add a recursive wave classifier for this milestone.
+- Filtered backtests must be point-in-time safe: the filter recomputes 4h/daily state for
+  each signal using only HTF bars completed by that signal timestamp. Full-file/latest HTF
+  state is diagnostic availability only and must not decide historical signals.
+- Generate the raw signal set with neutral/no HTF scoring before applying the HTF filter;
+  the filter updates each allowed/blocked signal's HTF state and HTF score from the
+  point-in-time alignment result.
+- CLI reports must keep generated counts separate from `backtested_signal_count`, and include
+  HTF availability, allowed/blocked counts, block reasons, and threshold summaries for the
+  filtered signal set.
+
+### 4. Validation & Error Matrix
+- Missing 4h file -> alignment state `neutral`, unavailable, filtered signals blocked with
+  `4h_unavailable`.
+- Missing daily/1d file -> veto state `neutral`, unavailable, no veto block.
+- Insufficient or invalid HTF pivots -> state `neutral` with diagnostic reason; 4h neutral
+  blocks filtered signals, daily neutral does not.
+- Bad optional HTF schema -> unavailable HTF result with error text in diagnostics, not a
+  required-market-data CLI failure.
+
+### 5. Good/Base/Bad Cases
+- Good: valid 4h bullish pivots allow long signals unless daily is bearish.
+- Base: daily neutral/missing leaves aligned 4h signals eligible for backtest.
+- Bad: 4h missing, neutral, bearish-for-long, or bullish-for-short blocks filtered signals
+  while preserving generated unfiltered counts.
+
+### 6. Tests Required
+- Unit tests for bullish, bearish, neutral, invalid, and insufficient HTF inference.
+- Unit tests for 4h alignment, daily veto, and missing-4h block reasons.
+- Regression tests that prove a future/latest 4h or daily state cannot allow or veto a signal
+  before the relevant HTF bars are complete.
+- CLI smoke/integration tests using temp Parquet fixtures for 1h plus optional 4h/daily data.
+- Filtered backtest diagnostics must assert generated, allowed, blocked, and threshold
+  processed counts.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+```python
+signals = generate_signals_from_ohlcv(df, symbol=symbol, timeframe="1h")
+result = run_backtest(market_data, signals)
+```
+
+#### Correct
+```python
+contexts = {
+    symbol: load_htf_context(symbol, data_dir, pivot_params=pivot_params)
+    for symbol in symbols
+}
+signals = generate_signals_from_ohlcv(
+    df,
+    symbol=symbol,
+    timeframe="1h",
+    htf_state="neutral",
+    pivot_params=pivot_params,
+)
+filtered = filter_signals_by_htf(signals, contexts)
+result = run_backtest(market_data, filtered.allowed_signals)
 ```

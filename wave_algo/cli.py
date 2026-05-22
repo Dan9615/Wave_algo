@@ -10,6 +10,12 @@ from typing import Any
 
 from wave_algo.backtest import BacktestConfig, run_threshold_sensitivity
 from wave_algo.data import OHLCVSchemaError, load_ohlcv
+from wave_algo.htf import (
+    DEFAULT_ALIGNMENT_TIMEFRAME,
+    DEFAULT_DAILY_VETO_TIMEFRAMES,
+    filter_signals_by_htf,
+    load_htf_context,
+)
 from wave_algo.pivots import ZigZagParams
 from wave_algo.signals import generate_signals_from_ohlcv
 
@@ -29,6 +35,18 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--timeframes", default="1h")
     backtest.add_argument("--thresholds", default="60,70,80")
     backtest.add_argument("--direction", choices=("long", "short", "both"), default="both")
+    backtest.add_argument(
+        "--htf-filter",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply 4h alignment and daily veto filtering before backtesting.",
+    )
+    backtest.add_argument("--htf-alignment-timeframe", default=DEFAULT_ALIGNMENT_TIMEFRAME)
+    backtest.add_argument(
+        "--htf-veto-timeframes",
+        default=",".join(DEFAULT_DAILY_VETO_TIMEFRAMES),
+        help="Comma-separated daily veto timeframe candidates, tried in order.",
+    )
     backtest.add_argument("--initial-equity", type=float, default=100_000.0)
     backtest.add_argument("--risk-fraction", type=float, default=0.01)
     backtest.add_argument("--fee-rate", type=float, default=0.0006)
@@ -65,6 +83,7 @@ def _run_backtest_command(args: argparse.Namespace) -> dict[str, Any]:
     symbols = _parse_csv(args.symbols)
     timeframes = _parse_csv(args.timeframes)
     thresholds = [float(value) for value in _parse_csv(args.thresholds)]
+    veto_timeframes = _parse_csv(args.htf_veto_timeframes)
     pivot_params = ZigZagParams(
         reversal_pct=args.reversal_pct,
         atr_period=args.atr_period,
@@ -81,6 +100,19 @@ def _run_backtest_command(args: argparse.Namespace) -> dict[str, Any]:
 
     market_data = {}
     generated_signals = []
+    htf_contexts = {}
+    if args.htf_filter:
+        htf_contexts = {
+            symbol: load_htf_context(
+                symbol,
+                args.data_dir,
+                alignment_timeframe=args.htf_alignment_timeframe,
+                veto_timeframes=veto_timeframes,
+                pivot_params=pivot_params,
+            )
+            for symbol in symbols
+        }
+
     for symbol in symbols:
         for timeframe in timeframes:
             frame = load_ohlcv(symbol, timeframe, args.data_dir)
@@ -96,9 +128,19 @@ def _run_backtest_command(args: argparse.Namespace) -> dict[str, Any]:
                 )
             )
 
+    htf_filter_result = None
+    backtest_signals = generated_signals
+    if args.htf_filter:
+        htf_filter_result = filter_signals_by_htf(
+            generated_signals,
+            htf_contexts,
+            alignment_timeframe=args.htf_alignment_timeframe,
+        )
+        backtest_signals = list(htf_filter_result.allowed_signals)
+
     results = run_threshold_sensitivity(
         market_data,
-        generated_signals,
+        backtest_signals,
         thresholds=thresholds,
         config=config,
     )
@@ -113,7 +155,21 @@ def _run_backtest_command(args: argparse.Namespace) -> dict[str, Any]:
             "min_bars_between_pivots": pivot_params.min_bars_between_pivots,
         },
         "signal_count": len(generated_signals),
+        "backtested_signal_count": len(backtest_signals),
         "signals_by_setup": dict(Counter(signal.setup_type for signal in generated_signals)),
+        "backtested_signals_by_setup": dict(
+            Counter(signal.setup_type for signal in backtest_signals)
+        ),
+        "htf_filter": _htf_filter_report(
+            enabled=args.htf_filter,
+            alignment_timeframe=args.htf_alignment_timeframe,
+            veto_timeframes=veto_timeframes,
+            contexts=htf_contexts,
+            generated_signal_count=len(generated_signals),
+            backtest_signal_count=len(backtest_signals),
+            filter_result=htf_filter_result,
+            include_blocked=args.include_trades,
+        ),
         "thresholds": {
             _format_threshold(threshold): result.summary
             for threshold, result in results.items()
@@ -124,6 +180,40 @@ def _run_backtest_command(args: argparse.Namespace) -> dict[str, Any]:
             _format_threshold(threshold): result.to_dict()
             for threshold, result in results.items()
         }
+    return report
+
+
+def _htf_filter_report(
+    *,
+    enabled: bool,
+    alignment_timeframe: str,
+    veto_timeframes: list[str],
+    contexts: dict[str, Any],
+    generated_signal_count: int,
+    backtest_signal_count: int,
+    filter_result: Any,
+    include_blocked: bool,
+) -> dict[str, Any]:
+    blocked_count = filter_result.blocked_count if filter_result is not None else 0
+    report: dict[str, Any] = {
+        "enabled": enabled,
+        "mode": "point_in_time_completed_bars" if enabled else "unfiltered",
+        "alignment_timeframe": alignment_timeframe,
+        "veto_timeframes": veto_timeframes,
+        "availability": {
+            symbol: context.to_dict()
+            for symbol, context in sorted(contexts.items())
+        },
+        "generated_signal_count": generated_signal_count,
+        "allowed_signal_count": backtest_signal_count,
+        "blocked_signal_count": blocked_count,
+        "block_reasons": filter_result.block_reasons if filter_result is not None else {},
+    }
+    if include_blocked and filter_result is not None:
+        report["blocked_signals"] = [
+            decision.to_dict()
+            for decision in filter_result.blocked_signals
+        ]
     return report
 
 

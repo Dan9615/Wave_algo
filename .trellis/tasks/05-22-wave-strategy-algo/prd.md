@@ -28,7 +28,7 @@ Design an Elliott Wave based algorithm from `wave_strategy.md` that can turn OHL
 
 ## Open Questions
 
-* None blocking for Milestone 2 implementation.
+* None blocking for point-in-time backtest integrity implementation.
 
 ## Decisions
 
@@ -147,8 +147,9 @@ Design an Elliott Wave based algorithm from `wave_strategy.md` that can turn OHL
   * The contract must support backtesting, debugging, threshold sensitivity, and later chart visualization.
 * Next step:
   * Milestone 1 is complete and pushed to `origin/main` at commit `c85bba7`.
-  * Start Milestone 2 implementation now.
-  * Milestone 2 focuses on local Parquet OHLCV loading, candidate signal generation from real OHLCV, and conservative CLI backtesting.
+  * Milestone 2 is complete and pushed to `origin/main` at commit `4b0b086`.
+  * Start Milestone 3 implementation now.
+  * Milestone 3 focuses on higher-timeframe Elliott Wave alignment and CLI/report diagnostics for filtered vs unfiltered backtests.
 * Second implementation milestone:
   * Add a local OHLCV loader for `data/ohlcv/{symbol}_{timeframe}.parquet`.
   * Validate required schema: `timestamp`, `open`, `high`, `low`, `close`, `volume`.
@@ -157,6 +158,23 @@ Design an Elliott Wave based algorithm from `wave_strategy.md` that can turn OHL
   * Implement 1% fixed-risk sizing, one position per symbol, max three portfolio positions, configurable fee/slippage, partial exits for Wave 3/Wave 5, and single-target Triangle exits.
   * Implement CLI reporting for configured symbols/timeframes and confidence thresholds 60/70/80.
   * Use synthetic/temp Parquet fixtures in tests; real market data files are optional and should not be required for tests.
+* Third implementation milestone:
+  * Load optional higher-timeframe OHLCV data from the same local Parquet contract for `4h` and `1d`/`daily` timeframes.
+  * Infer HTF Elliott Wave regime states as `bullish`, `bearish`, or `neutral` using deterministic pivots plus existing hard-rule validators where possible.
+  * Apply the agreed alignment rule: 4h alignment is required, and daily is a veto.
+    * Long signals require 4h bullish; daily bearish blocks long.
+    * Short signals require 4h bearish; daily bullish blocks short.
+    * Daily neutral does not block if 4h aligns.
+  * Preserve an unfiltered diagnostic mode so backtests can compare filtered vs unfiltered signal counts/results.
+  * Apply HTF context point-in-time for each signal: filtered backtests must use only 4h/daily bars completed by the signal timestamp, not the latest state from the full HTF file.
+  * CLI reports should include HTF data availability, allowed/blocked signal counts, block reasons, and per-threshold results for filtered signals.
+  * Tests should use synthetic/temp Parquet fixtures and not require real BTC/ETH/SOL files.
+* Point-in-time backtest integrity fix:
+  * Signal generation from OHLCV must not detect pivots from the full future dataframe and then assign signals to historical timestamps.
+  * Candidate signals must be emitted only using bars available at or before the signal timestamp.
+  * If a pivot is only confirmed after later bars, the signal timestamp must be the confirmation bar, not the original pivot bar.
+  * HTF filtering must keep using completed higher-timeframe bars as of each signal timestamp.
+  * Regression tests must prove that adding future bars cannot create or alter earlier signal timestamps.
 
 ## Requirements (Evolving)
 
@@ -186,6 +204,10 @@ Design an Elliott Wave based algorithm from `wave_strategy.md` that can turn OHL
 * Use the Python >=3.11 / pandas / numpy / pyarrow / pytest / ruff baseline for the Python project.
 * Implement Milestone 2 after the core engine and synthetic tests are complete.
 * Add a focused local data-loading boundary if needed; keep it inside the `wave_algo` package and update specs if a new module such as `data.py` is introduced.
+* Implement Milestone 3 HTF filtering after Milestone 2 local data/backtest infrastructure is complete.
+* HTF filtering must be deterministic and diagnostic-first; do not introduce a full recursive wave classifier.
+* Backtest integrity requires point-in-time signal generation for both base timeframe pivots and HTF filters.
+* HTF filtering must be point-in-time safe for backtests; latest full-file HTF state may appear in availability diagnostics only.
 
 ## Acceptance Criteria (Evolving)
 

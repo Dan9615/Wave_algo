@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wave-algo"
+version = "0.1.0"
+description = "Deterministic Elliott Wave signal engine MVP"
+readme = "wave_strategy.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy",
+  "pandas",
+  "pyarrow",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "ruff",
+]
+
+[project.scripts]
+wave-algo = "wave_algo.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["wave_algo*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [".codex", ".trellis"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

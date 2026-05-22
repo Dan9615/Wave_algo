@@ -130,3 +130,73 @@ return TradeSignal(
     params=params,
 )
 ```
+
+## Scenario: Local OHLCV Backtest MVP
+
+### 1. Scope / Trigger
+- Trigger: Milestone 2 local Parquet loading, generated OHLCV candidates, and CLI
+  backtesting.
+
+### 2. Signatures
+- Data loader: `load_ohlcv(symbol: str, timeframe: str, data_dir: str | Path) -> DataFrame`.
+- Signal generation: `generate_signals_from_ohlcv(df, *, symbol, timeframe, direction=None,
+  directions=None, htf_state=None, pivot_params=None, scan_all=True) -> list[TradeSignal]`.
+- Backtest: `run_backtest(market_data, signals, *, threshold=70.0, config=None)`.
+- CLI command: `wave-algo backtest --data-dir data/ohlcv --symbols BTCUSDT,ETHUSDT,SOLUSDT
+  --timeframes 1h --thresholds 60,70,80`.
+
+### 3. Contracts
+- Local OHLCV files use `data/ohlcv/{symbol}_{timeframe}.parquet`.
+- Required columns are `timestamp`, `open`, `high`, `low`, `close`, and `volume`.
+- Backtest fills use signal bar close for eligibility and next-bar open for entry.
+- Active trades only free symbol/portfolio capacity after exits strictly before a new
+  candidate entry timestamp. Same-bar intrabar exits must not free capacity for another
+  signal entering at that same open.
+- Wave 3/Wave 5 use 50% TP1, breakeven stop after TP1, and 50% TP2.
+- Triangle breakout uses one measured-move target.
+- Default costs are 0.06% fee and 0.02% slippage per fill.
+- Default sizing risks 1% of realized equity, caps notional to available equity, allows one
+  open position per symbol, and allows at most three portfolio positions.
+
+### 4. Validation & Error Matrix
+- Missing Parquet file -> `FileNotFoundError`.
+- Missing OHLCV column -> `OHLCVSchemaError`.
+- Non-numeric OHLCV price/volume column -> `OHLCVSchemaError`.
+- Signal below threshold -> skipped with `below_confidence_threshold`.
+- Signal with no next bar -> skipped with `no_next_bar_for_entry`.
+- Invalid entry/stop geometry -> skipped with `invalid_stop_for_entry`.
+
+### 5. Good/Base/Bad Cases
+- Good: candidate signal has a next bar, valid risk distance, and exits by stop, target, or
+  time stop.
+- Base: generated candidates below threshold are excluded from trades but counted in skipped
+  diagnostics.
+- Bad: tests must not require real market data files; use synthetic temp Parquet fixtures.
+
+### 6. Tests Required
+- Loader schema, missing-file, and bad-type tests.
+- OHLCV-generated Wave 3, Wave 5, and triangle candidate tests.
+- Backtest tests for next-open entries, stop-first same-bar collision, fees/slippage, sizing
+  constraints, partial exits, breakeven stops, time stops, same-open ordering, and portfolio
+  limits.
+- CLI smoke test using temp Parquet data.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+```python
+df = pd.read_parquet("data/ohlcv/BTCUSDT_1h.parquet")
+signals = calculate_wave3_signal(detect_pivots(df)[-3:], symbol="BTCUSDT", timeframe="1h")
+```
+
+#### Correct
+```python
+df = load_ohlcv("BTCUSDT", "1h", data_dir)
+signals = generate_signals_from_ohlcv(
+    df,
+    symbol="BTCUSDT",
+    timeframe="1h",
+    pivot_params=ZigZagParams(reversal_pct=0.03),
+)
+result = run_backtest({("BTCUSDT", "1h"): df}, signals, threshold=70.0)
+```

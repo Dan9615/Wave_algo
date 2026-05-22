@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import asdict
 from typing import Any
 
 import pandas as pd
@@ -275,6 +276,9 @@ def calculate_triangle_signal(
         return None
 
     p_e = pivots[-1]
+    expected_e_kind = PivotKind.LOW if normalized_direction is Direction.LONG else PivotKind.HIGH
+    if p_e.kind is not expected_e_kind:
+        return None
     if normalized_direction is Direction.LONG and p_e.price >= breakout_price:
         return None
     if normalized_direction is Direction.SHORT and p_e.price <= breakout_price:
@@ -329,37 +333,153 @@ def calculate_triangle_signal(
     )
 
 
+def _direction_list(
+    direction: Direction | str | None,
+    directions: Sequence[Direction | str] | None,
+) -> tuple[Direction, ...]:
+    if direction is not None and directions is not None:
+        raise ValueError("Provide either direction or directions, not both.")
+    if directions is not None:
+        return tuple(normalize_direction(candidate) for candidate in directions)
+    if direction is not None:
+        return (normalize_direction(direction),)
+    return (Direction.LONG, Direction.SHORT)
+
+
+def _window_ends(pivot_count: int, window_size: int, scan_all: bool) -> range:
+    if pivot_count < window_size:
+        return range(0)
+    if scan_all:
+        return range(window_size, pivot_count + 1)
+    return range(pivot_count, pivot_count + 1)
+
+
+def _base_generation_params(params: ZigZagParams) -> dict[str, Any]:
+    return {
+        "generated_from_ohlcv": True,
+        "pivot_params": asdict(params),
+    }
+
+
+def _signal_sort_key(signal: TradeSignal) -> tuple[int, str, str]:
+    signal_index = int(signal.params.get("signal_index", signal.source_pivots[-1].index))
+    return (signal_index, signal.symbol, signal.setup_type)
+
+
+def _dedupe_signals(signals: Sequence[TradeSignal]) -> list[TradeSignal]:
+    seen: set[tuple[Any, ...]] = set()
+    unique: list[TradeSignal] = []
+    for signal in sorted(signals, key=_signal_sort_key):
+        key = (
+            signal.symbol,
+            signal.timeframe,
+            signal.setup_type,
+            signal.direction.value,
+            signal.signal_time,
+            tuple(pivot.index for pivot in signal.source_pivots),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(signal)
+    return unique
+
+
+def _first_triangle_breakout(
+    df: pd.DataFrame,
+    pivots: Sequence[Pivot],
+    *,
+    symbol: str,
+    timeframe: str,
+    direction: Direction,
+    htf_state: HTFState | str | None,
+    params: dict[str, Any],
+) -> TradeSignal | None:
+    p_e = pivots[-1]
+    if p_e.index + 1 >= len(df):
+        return None
+
+    for row_index in range(p_e.index + 1, len(df)):
+        row = df.iloc[row_index]
+        signal = calculate_triangle_signal(
+            pivots,
+            symbol=symbol,
+            timeframe=timeframe,
+            direction=direction,
+            breakout_price=float(row["close"]),
+            htf_state=htf_state,
+            params={
+                **params,
+                "signal_index": row_index,
+                "breakout_index": row_index,
+            },
+            signal_time=row["timestamp"],
+        )
+        if signal is not None:
+            return signal
+    return None
+
+
 def generate_signals_from_ohlcv(
     df: pd.DataFrame,
     *,
     symbol: str,
     timeframe: str,
-    direction: Direction | str,
+    direction: Direction | str | None = None,
+    directions: Sequence[Direction | str] | None = None,
     htf_state: HTFState | str | None = None,
     pivot_params: ZigZagParams | None = None,
+    scan_all: bool = True,
 ) -> list[TradeSignal]:
-    """Detect pivots and return first-milestone candidate signals from the latest structure."""
+    """Detect pivots and return deterministic candidate signals from OHLCV.
 
-    pivots = detect_pivots(df, pivot_params)
-    signals: list[TradeSignal] = []
-    if len(pivots) >= 3:
-        wave3 = calculate_wave3_signal(
-            pivots[-3:],
-            symbol=symbol,
-            timeframe=timeframe,
-            direction=direction,
-            htf_state=htf_state,
-        )
-        if wave3 is not None:
-            signals.append(wave3)
-    if len(pivots) >= 5:
-        wave5 = calculate_wave5_signal(
-            pivots[-5:],
-            symbol=symbol,
-            timeframe=timeframe,
-            direction=direction,
-            htf_state=htf_state,
-        )
-        if wave5 is not None:
-            signals.append(wave5)
-    return signals
+    This is intentionally a modest pivot-window scanner, not a recursive Elliott
+    Wave classifier. Each candidate window is delegated to the setup calculators.
+    """
+
+    params = pivot_params or ZigZagParams()
+    pivots = detect_pivots(df, params)
+    generated: list[TradeSignal] = []
+    base_params = _base_generation_params(params)
+    requested_directions = _direction_list(direction, directions)
+
+    for candidate_direction in requested_directions:
+        for end in _window_ends(len(pivots), 3, scan_all):
+            window = pivots[end - 3 : end]
+            wave3 = calculate_wave3_signal(
+                window,
+                symbol=symbol,
+                timeframe=timeframe,
+                direction=candidate_direction,
+                htf_state=htf_state,
+                params={**base_params, "signal_index": window[-1].index},
+            )
+            if wave3 is not None:
+                generated.append(wave3)
+
+        for end in _window_ends(len(pivots), 5, scan_all):
+            window = pivots[end - 5 : end]
+            wave5 = calculate_wave5_signal(
+                window,
+                symbol=symbol,
+                timeframe=timeframe,
+                direction=candidate_direction,
+                htf_state=htf_state,
+                params={**base_params, "signal_index": window[-1].index},
+            )
+            if wave5 is not None:
+                generated.append(wave5)
+
+            triangle = _first_triangle_breakout(
+                df,
+                window,
+                symbol=symbol,
+                timeframe=timeframe,
+                direction=candidate_direction,
+                htf_state=htf_state,
+                params=base_params,
+            )
+            if triangle is not None:
+                generated.append(triangle)
+
+    return _dedupe_signals(generated)

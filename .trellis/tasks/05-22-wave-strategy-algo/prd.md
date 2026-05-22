@@ -28,7 +28,7 @@ Design an Elliott Wave based algorithm from `wave_strategy.md` that can turn OHL
 
 ## Open Questions
 
-* None blocking for Milestone 1 implementation.
+* None blocking for Milestone 2 implementation.
 
 ## Decisions
 
@@ -146,8 +146,17 @@ Design an Elliott Wave based algorithm from `wave_strategy.md` that can turn OHL
   * Each signal should include at least: `symbol`, `timeframe`, `setup_type`, `direction`, `signal_time`, `entry`, `stop`, `targets`, `confidence`, `score_breakdown`, `htf_state`, `invalidation`, `source_pivots`, and `params`.
   * The contract must support backtesting, debugging, threshold sensitivity, and later chart visualization.
 * Next step:
-  * Start Milestone 1 implementation now.
-  * Continue detailed backtest/report/config design after the core engine and synthetic tests exist.
+  * Milestone 1 is complete and pushed to `origin/main` at commit `c85bba7`.
+  * Start Milestone 2 implementation now.
+  * Milestone 2 focuses on local Parquet OHLCV loading, candidate signal generation from real OHLCV, and conservative CLI backtesting.
+* Second implementation milestone:
+  * Add a local OHLCV loader for `data/ohlcv/{symbol}_{timeframe}.parquet`.
+  * Validate required schema: `timestamp`, `open`, `high`, `low`, `close`, `volume`.
+  * Generate candidate Wave 3, Wave 5, and Triangle Breakout signals from detected pivots.
+  * Implement the conservative backtest execution model: signal bar close, next-bar open entry, intrabar stop/target checks, stop-first same-bar collisions, setup time stops.
+  * Implement 1% fixed-risk sizing, one position per symbol, max three portfolio positions, configurable fee/slippage, partial exits for Wave 3/Wave 5, and single-target Triangle exits.
+  * Implement CLI reporting for configured symbols/timeframes and confidence thresholds 60/70/80.
+  * Use synthetic/temp Parquet fixtures in tests; real market data files are optional and should not be required for tests.
 
 ## Requirements (Evolving)
 
@@ -175,7 +184,8 @@ Design an Elliott Wave based algorithm from `wave_strategy.md` that can turn OHL
 * First milestone may ship without real market-data backtests if the core engine and synthetic tests are complete.
 * Use the `wave_algo` package/module boundary for first-milestone implementation.
 * Use the Python >=3.11 / pandas / numpy / pyarrow / pytest / ruff baseline for the Python project.
-* Implement Milestone 1 before expanding later backtest/report/config details.
+* Implement Milestone 2 after the core engine and synthetic tests are complete.
+* Add a focused local data-loading boundary if needed; keep it inside the `wave_algo` package and update specs if a new module such as `data.py` is introduced.
 
 ## Acceptance Criteria (Evolving)
 

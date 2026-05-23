@@ -15,6 +15,7 @@ from wave_algo.models import Direction, HTFState, Pivot, TradeSignal, normalize_
 from wave_algo.pivots import ZigZagParams, detect_pivots
 from wave_algo.rules import validate_impulse, validate_wave_1_to_2, validate_wave_1_to_4
 from wave_algo.scoring import SCORE_WEIGHTS, htf_alignment_score
+from wave_algo.timeframes import completed_frame_asof
 
 DEFAULT_ALIGNMENT_TIMEFRAME = "4h"
 DEFAULT_DAILY_VETO_TIMEFRAMES = ("1d", "daily")
@@ -392,7 +393,7 @@ def _result_asof_signal(result: HTFTimeframeResult, signal_time: Any) -> HTFTime
     if not result.available or result.frame is None:
         return result
 
-    frame = _completed_frame_asof(
+    frame = completed_frame_asof(
         result.frame,
         timeframe=result.timeframe,
         signal_time=signal_time,
@@ -421,39 +422,6 @@ def _result_asof_signal(result: HTFTimeframeResult, signal_time: Any) -> HTFTime
         timeframe=result.timeframe or "htf",
         pivot_params=result.pivot_params,
     )
-
-
-def _completed_frame_asof(
-    frame: pd.DataFrame,
-    *,
-    timeframe: str | None,
-    signal_time: Any,
-) -> pd.DataFrame:
-    signal_timestamp = pd.Timestamp(signal_time)
-    bar_end_times = pd.to_datetime(frame["timestamp"]) + _timeframe_duration(timeframe)
-    return frame.loc[bar_end_times <= signal_timestamp].reset_index(drop=True)
-
-
-def _timeframe_duration(timeframe: str | None) -> pd.Timedelta:
-    if timeframe is None:
-        return pd.Timedelta(0)
-    normalized = timeframe.strip().lower()
-    if normalized == "daily":
-        return pd.Timedelta(days=1)
-    unit = normalized[-1:]
-    amount_text = normalized[:-1] or "1"
-    try:
-        amount = float(amount_text)
-    except ValueError:
-        return pd.Timedelta(0)
-
-    if unit == "h":
-        return pd.Timedelta(hours=amount)
-    if unit == "d":
-        return pd.Timedelta(days=amount)
-    if unit == "m":
-        return pd.Timedelta(minutes=amount)
-    return pd.Timedelta(0)
 
 
 def _signal_with_htf_state(signal: TradeSignal, htf_state: HTFState) -> TradeSignal:

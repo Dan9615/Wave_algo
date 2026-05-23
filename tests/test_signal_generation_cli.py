@@ -293,3 +293,104 @@ def test_cli_backtest_can_run_unfiltered_diagnostics(
         "blocked_signal_count": 0,
         "block_reasons": {},
     }
+
+
+def test_cli_ltf_disabled_preserves_unfiltered_signal_counts(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    data_dir = tmp_path / "ohlcv"
+    data_dir.mkdir()
+    frame = candidate_frame()
+    frame.to_parquet(data_dir / "BTCUSDT_1h.parquet", engine="pyarrow")
+    pivot_params = ZigZagParams(
+        reversal_pct=0.03,
+        atr_period=2,
+        min_bars_between_pivots=1,
+    )
+    expected_signals = generate_signals_from_ohlcv(
+        frame,
+        symbol="BTCUSDT",
+        timeframe="1h",
+        htf_state="neutral",
+        pivot_params=pivot_params,
+    )
+
+    exit_code = main(
+        [
+            "backtest",
+            "--data-dir",
+            str(data_dir),
+            "--symbols",
+            "BTCUSDT",
+            "--timeframes",
+            "1h",
+            "--no-htf-filter",
+            "--ltf-timeframe",
+            "15m",
+            "--reversal-pct",
+            "0.03",
+            "--atr-period",
+            "2",
+            "--min-bars-between-pivots",
+            "1",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["signal_count"] == len(expected_signals)
+    assert payload["backtested_signal_count"] == len(expected_signals)
+    assert payload["ltf_confirmation"] == {
+        "enabled": False,
+        "mode": "unconfirmed",
+        "timeframe": "15m",
+        "lookback_bars": 16,
+        "availability": {},
+        "generated_signal_count": len(expected_signals),
+        "input_signal_count": len(expected_signals),
+        "allowed_signal_count": len(expected_signals),
+        "blocked_signal_count": 0,
+        "block_reasons": {},
+    }
+
+
+def test_cli_ltf_enabled_reports_missing_data_and_blocked_details(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    data_dir = tmp_path / "ohlcv"
+    data_dir.mkdir()
+    candidate_frame().to_parquet(data_dir / "BTCUSDT_1h.parquet", engine="pyarrow")
+
+    exit_code = main(
+        [
+            "backtest",
+            "--data-dir",
+            str(data_dir),
+            "--symbols",
+            "BTCUSDT",
+            "--timeframes",
+            "1h",
+            "--no-htf-filter",
+            "--ltf-confirmation",
+            "--include-trades",
+            "--reversal-pct",
+            "0.03",
+            "--atr-period",
+            "2",
+            "--min-bars-between-pivots",
+            "1",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    ltf_report = payload["ltf_confirmation"]
+    assert ltf_report["enabled"]
+    assert ltf_report["mode"] == "point_in_time_completed_bars"
+    assert not ltf_report["availability"]["BTCUSDT"]["confirmation"]["available"]
+    assert ltf_report["block_reasons"] == {"15m_unavailable": payload["signal_count"]}
+    assert ltf_report["allowed_signal_count"] == 0
+    assert payload["backtested_signal_count"] == 0
+    assert len(ltf_report["blocked_signals"]) == payload["signal_count"]

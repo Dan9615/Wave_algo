@@ -16,6 +16,12 @@ from wave_algo.htf import (
     filter_signals_by_htf,
     load_htf_context,
 )
+from wave_algo.ltf import (
+    DEFAULT_CONFIRMATION_LOOKBACK_BARS,
+    DEFAULT_CONFIRMATION_TIMEFRAME,
+    filter_signals_by_ltf,
+    load_ltf_context,
+)
 from wave_algo.pivots import ZigZagParams
 from wave_algo.signals import generate_signals_from_ohlcv
 
@@ -46,6 +52,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--htf-veto-timeframes",
         default=",".join(DEFAULT_DAILY_VETO_TIMEFRAMES),
         help="Comma-separated daily veto timeframe candidates, tried in order.",
+    )
+    backtest.add_argument(
+        "--ltf-confirmation",
+        action="store_true",
+        help="Require optional lower-timeframe reversal confirmation before backtesting.",
+    )
+    backtest.add_argument("--ltf-timeframe", default=DEFAULT_CONFIRMATION_TIMEFRAME)
+    backtest.add_argument(
+        "--ltf-lookback-bars",
+        type=int,
+        default=DEFAULT_CONFIRMATION_LOOKBACK_BARS,
+        help="Completed lower-timeframe bars to scan for recent confirmation.",
     )
     backtest.add_argument("--initial-equity", type=float, default=100_000.0)
     backtest.add_argument("--risk-fraction", type=float, default=0.01)
@@ -112,6 +130,17 @@ def _run_backtest_command(args: argparse.Namespace) -> dict[str, Any]:
             )
             for symbol in symbols
         }
+    ltf_contexts = {}
+    if args.ltf_confirmation:
+        ltf_contexts = {
+            symbol: load_ltf_context(
+                symbol,
+                args.data_dir,
+                confirmation_timeframe=args.ltf_timeframe,
+                pivot_params=pivot_params,
+            )
+            for symbol in symbols
+        }
 
     for symbol in symbols:
         for timeframe in timeframes:
@@ -137,6 +166,17 @@ def _run_backtest_command(args: argparse.Namespace) -> dict[str, Any]:
             alignment_timeframe=args.htf_alignment_timeframe,
         )
         backtest_signals = list(htf_filter_result.allowed_signals)
+
+    ltf_filter_result = None
+    ltf_input_signal_count = len(backtest_signals)
+    if args.ltf_confirmation:
+        ltf_filter_result = filter_signals_by_ltf(
+            backtest_signals,
+            ltf_contexts,
+            confirmation_timeframe=args.ltf_timeframe,
+            lookback_bars=args.ltf_lookback_bars,
+        )
+        backtest_signals = list(ltf_filter_result.allowed_signals)
 
     results = run_threshold_sensitivity(
         market_data,
@@ -166,8 +206,19 @@ def _run_backtest_command(args: argparse.Namespace) -> dict[str, Any]:
             veto_timeframes=veto_timeframes,
             contexts=htf_contexts,
             generated_signal_count=len(generated_signals),
-            backtest_signal_count=len(backtest_signals),
+            backtest_signal_count=ltf_input_signal_count,
             filter_result=htf_filter_result,
+            include_blocked=args.include_trades,
+        ),
+        "ltf_confirmation": _ltf_confirmation_report(
+            enabled=args.ltf_confirmation,
+            confirmation_timeframe=args.ltf_timeframe,
+            lookback_bars=args.ltf_lookback_bars,
+            contexts=ltf_contexts,
+            generated_signal_count=len(generated_signals),
+            input_signal_count=ltf_input_signal_count,
+            backtest_signal_count=len(backtest_signals),
+            filter_result=ltf_filter_result,
             include_blocked=args.include_trades,
         ),
         "thresholds": {
@@ -180,6 +231,42 @@ def _run_backtest_command(args: argparse.Namespace) -> dict[str, Any]:
             _format_threshold(threshold): result.to_dict()
             for threshold, result in results.items()
         }
+    return report
+
+
+def _ltf_confirmation_report(
+    *,
+    enabled: bool,
+    confirmation_timeframe: str,
+    lookback_bars: int,
+    contexts: dict[str, Any],
+    generated_signal_count: int,
+    input_signal_count: int,
+    backtest_signal_count: int,
+    filter_result: Any,
+    include_blocked: bool,
+) -> dict[str, Any]:
+    blocked_count = filter_result.blocked_count if filter_result is not None else 0
+    report: dict[str, Any] = {
+        "enabled": enabled,
+        "mode": "point_in_time_completed_bars" if enabled else "unconfirmed",
+        "timeframe": confirmation_timeframe,
+        "lookback_bars": lookback_bars,
+        "availability": {
+            symbol: context.to_dict()
+            for symbol, context in sorted(contexts.items())
+        },
+        "generated_signal_count": generated_signal_count,
+        "input_signal_count": input_signal_count,
+        "allowed_signal_count": backtest_signal_count,
+        "blocked_signal_count": blocked_count,
+        "block_reasons": filter_result.block_reasons if filter_result is not None else {},
+    }
+    if include_blocked and filter_result is not None:
+        report["blocked_signals"] = [
+            decision.to_dict()
+            for decision in filter_result.blocked_signals
+        ]
     return report
 
 

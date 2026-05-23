@@ -148,8 +148,9 @@ Design an Elliott Wave based algorithm from `wave_strategy.md` that can turn OHL
 * Next step:
   * Milestone 1 is complete and pushed to `origin/main` at commit `c85bba7`.
   * Milestone 2 is complete and pushed to `origin/main` at commit `4b0b086`.
-  * Start Milestone 3 implementation now.
-  * Milestone 3 focuses on higher-timeframe Elliott Wave alignment and CLI/report diagnostics for filtered vs unfiltered backtests.
+  * Milestone 3 is complete at commit `9a439f5`.
+  * Start Milestone 4 implementation now.
+  * Milestone 4 focuses on optional lower-timeframe entry confirmation and CLI/report diagnostics for confirmed vs unconfirmed backtests.
 * Second implementation milestone:
   * Add a local OHLCV loader for `data/ohlcv/{symbol}_{timeframe}.parquet`.
   * Validate required schema: `timestamp`, `open`, `high`, `low`, `close`, `volume`.
@@ -169,6 +170,15 @@ Design an Elliott Wave based algorithm from `wave_strategy.md` that can turn OHL
   * Apply HTF context point-in-time for each signal: filtered backtests must use only 4h/daily bars completed by the signal timestamp, not the latest state from the full HTF file.
   * CLI reports should include HTF data availability, allowed/blocked signal counts, block reasons, and per-threshold results for filtered signals.
   * Tests should use synthetic/temp Parquet fixtures and not require real BTC/ETH/SOL files.
+* Fourth implementation milestone:
+  * Add an explicit CLI control to enable lower-timeframe entry confirmation, defaulting the confirmation timeframe to `15m`.
+  * Load optional lower-timeframe OHLCV data from the same local Parquet contract: `data/ohlcv/{symbol}_{timeframe}.parquet`.
+  * Preserve existing generated signal counts and backtest behavior when lower-timeframe confirmation is disabled.
+  * Missing lower-timeframe files should be diagnostic and should only block signals when confirmation is enabled.
+  * Long signals require a recent bullish lower-timeframe reversal/confirmation; short signals require a recent bearish lower-timeframe reversal/confirmation.
+  * Lower-timeframe confirmation must be point-in-time safe: each base signal may use only completed lower-timeframe bars available by that signal's evaluation boundary, not latest/full-file lower-timeframe state.
+  * CLI reports should include lower-timeframe confirmation mode, timeframe, availability, generated/input/allowed/blocked counts, block reasons, and blocked details when full trade details are requested.
+  * Tests should prove disabled mode preserves existing counts, enabled mode allows aligned confirmation and blocks missing/opposite confirmation, and future lower-timeframe bars cannot alter earlier confirmation decisions.
 * Point-in-time backtest integrity fix:
   * Signal generation from OHLCV must not detect pivots from the full future dataframe and then assign signals to historical timestamps.
   * Candidate signals must be emitted only using bars available at or before the signal timestamp.
@@ -208,6 +218,9 @@ Design an Elliott Wave based algorithm from `wave_strategy.md` that can turn OHL
 * HTF filtering must be deterministic and diagnostic-first; do not introduce a full recursive wave classifier.
 * Backtest integrity requires point-in-time signal generation for both base timeframe pivots and HTF filters.
 * HTF filtering must be point-in-time safe for backtests; latest full-file HTF state may appear in availability diagnostics only.
+* Implement Milestone 4 lower-timeframe confirmation as an optional filter after generated/HTF-filtered signals.
+* Lower-timeframe confirmation must default to disabled and must not require 15m data for ordinary unconfirmed backtests.
+* Lower-timeframe confirmation must use completed bars from the configured confirmation timeframe only as of each base signal's evaluation boundary.
 
 ## Acceptance Criteria (Evolving)
 
@@ -231,6 +244,9 @@ Design an Elliott Wave based algorithm from `wave_strategy.md` that can turn OHL
 * [ ] Backtest logic handles 50/50 TP1/TP2 scale-out and breakeven stop movement for Wave 3 / Wave 5 setups.
 * [ ] Backtest logic applies 72-bar time stops to Wave 3/Wave 5 and 48-bar time stops to Triangle Breakout.
 * [ ] Higher-timeframe Elliott Wave filters produce bullish/bearish/neutral regime states and block non-aligned filtered signals.
+* [ ] Lower-timeframe confirmation can be enabled explicitly from the CLI with a configurable confirmation timeframe defaulting to `15m`.
+* [ ] Missing lower-timeframe data is reported diagnostically and blocks signals only when lower-timeframe confirmation is enabled.
+* [ ] Lower-timeframe confirmation is point-in-time safe: adding future 15m bars cannot change earlier confirmation decisions.
 * [ ] Tests cover the MVP wave rules and at least one false-positive rejection case.
 * [ ] First milestone includes synthetic tests for all three setup calculators before real-data backtesting is required.
 * [ ] `pyproject.toml` defines the Python package and test/lint tooling baseline.

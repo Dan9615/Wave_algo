@@ -25,6 +25,8 @@ wave_algo/
 ├── signals.py     # Wave 3, Wave 5, Triangle signal calculators
 ├── scoring.py     # confidence scoring weights and breakdowns
 ├── htf.py         # higher-timeframe regime skeleton/helpers
+├── ltf.py         # optional lower-timeframe entry confirmation helpers
+├── timeframes.py  # shared timeframe duration and completed-bar slicing helpers
 ├── backtest.py    # backtest skeleton/helpers
 └── cli.py         # CLI entrypoint skeleton/helpers
 
@@ -51,8 +53,14 @@ Use focused modules with stable contracts:
   validators instead of re-implementing hard rules inline.
 - Put setup construction in `signals.py`; Wave 3, Wave 5, and Triangle setup functions
   should emit the same diagnostic `TradeSignal` contract.
-- Keep `htf.py`, `backtest.py`, and `cli.py` thin until real-data backtesting is in
-  scope. Do not hide core rule logic in CLI or backtest code.
+- Put point-in-time higher-timeframe filtering in `htf.py`; do not make CLI or backtest
+  code decide 4h/daily alignment inline.
+- Put optional lower-timeframe entry confirmation in `ltf.py`; do not make signal
+  calculators or backtest code read 15m files directly.
+- Put shared timeframe parsing and completed-bar slicing in `timeframes.py`; do not
+  duplicate timestamp-boundary logic between HTF and LTF filters.
+- Keep `htf.py`, `ltf.py`, `backtest.py`, and `cli.py` thin enough that core rules remain
+  in `rules.py`, `pivots.py`, and `signals.py`.
 
 ---
 
@@ -74,3 +82,5 @@ Use focused modules with stable contracts:
 - `wave_algo/data.py` is the source of truth for local Parquet OHLCV loading from
   `data/ohlcv/{symbol}_{timeframe}.parquet`.
 - `wave_algo/signals.py` is the source of truth for first-milestone setup calculators.
+- `wave_algo/timeframes.py` is the source of truth for interpreting compact labels such as
+  `15m`, `1h`, `4h`, `1d`, and `daily` when slicing completed bars.

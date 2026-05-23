@@ -302,3 +302,83 @@ signals = generate_signals_from_ohlcv(
 filtered = filter_signals_by_htf(signals, contexts)
 result = run_backtest(market_data, filtered.allowed_signals)
 ```
+
+## Scenario: Lower-Timeframe Confirmation MVP
+
+### 1. Scope / Trigger
+- Trigger: Milestone 4 optional 15m entry confirmation, local Parquet loading, signal
+  filtering, and CLI diagnostics.
+
+### 2. Signatures
+- Optional context loader: `load_ltf_context(symbol, data_dir, *,
+  confirmation_timeframe="15m", pivot_params=None) -> LTFContext`.
+- Signal filter: `filter_signals_by_ltf(signals, contexts, *,
+  confirmation_timeframe="15m", lookback_bars=16) -> LTFFilterResult`.
+- CLI opt-in: `wave-algo backtest --ltf-confirmation --ltf-timeframe 15m`.
+
+### 3. Contracts
+- Optional LTF files use the same local contract: `data/ohlcv/{symbol}_{timeframe}.parquet`.
+- Lower-timeframe confirmation is disabled by default; disabled mode must preserve generated
+  and backtested signal counts from the unconfirmed path.
+- Missing or bad 15m data is diagnostic-only unless `--ltf-confirmation` is enabled. When
+  enabled, missing data blocks affected signals with an explicit unavailable reason.
+- A long signal requires a recent bullish lower-timeframe Wave 1/Wave 2-style reversal:
+  latest recent pivots validate with `validate_wave_1_to_2(..., "long")` and the latest
+  completed lower-timeframe close confirms above the impulse pivot.
+- A short signal uses the same primitive inverted for `short`, with the latest completed
+  close confirming below the impulse pivot.
+- LTF decisions are point-in-time safe: for each base signal, slice lower-timeframe bars by
+  completed bar end time at or before the base signal evaluation boundary. Full-file/latest
+  LTF pivots may appear only in availability diagnostics.
+- CLI reports must include LTF enabled/mode, timeframe, lookback bars, availability,
+  generated/input/allowed/blocked counts, block reasons, and blocked details when
+  `--include-trades` is passed.
+
+### 4. Validation & Error Matrix
+- Missing LTF file with confirmation disabled -> no block, availability remains empty.
+- Missing LTF file with confirmation enabled -> block with `<timeframe>_unavailable`.
+- No completed LTF bars by the signal boundary -> block with `<timeframe>_no_completed_bars`.
+- Fewer than three recent confirmed LTF pivots -> block with
+  `<timeframe>_insufficient_recent_pivots`.
+- Recent opposite or non-confirming pivots -> block with
+  `<timeframe>_no_bullish_confirmation` or `<timeframe>_no_bearish_confirmation`.
+- Non-positive lookback -> `ValueError`.
+
+### 5. Good/Base/Bad Cases
+- Good: 1h long signal at its evaluation boundary sees completed 15m low-high-higher-low
+  structure and a close above the 15m impulse high, so it remains eligible.
+- Base: unconfirmed backtest runs without 15m files and produces the same signal counts.
+- Bad: adding future 15m bars after the base signal boundary changes full-file diagnostics
+  but must not change that earlier signal's allow/block decision.
+
+### 6. Tests Required
+- Unit tests for aligned bullish and bearish LTF confirmations.
+- Unit tests for missing data and opposite-confirmation block reasons.
+- Regression test proving future lower-timeframe bars cannot change an earlier decision.
+- CLI tests proving disabled LTF confirmation preserves counts and enabled missing data
+  reports availability/block details without requiring real market files.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+```python
+ltf = load_ohlcv(symbol, "15m", data_dir)
+latest_pivots = detect_pivots(ltf)[-3:]
+if validate_wave_1_to_2(latest_pivots, signal.direction).valid:
+    allowed.append(signal)
+```
+
+#### Correct
+```python
+contexts = {
+    symbol: load_ltf_context(symbol, data_dir, confirmation_timeframe="15m")
+    for symbol in symbols
+}
+filtered = filter_signals_by_ltf(
+    htf_filtered_signals,
+    contexts,
+    confirmation_timeframe="15m",
+    lookback_bars=16,
+)
+result = run_backtest(market_data, filtered.allowed_signals)
+```

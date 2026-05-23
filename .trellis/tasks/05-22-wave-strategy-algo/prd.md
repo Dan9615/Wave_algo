@@ -149,8 +149,8 @@ Design an Elliott Wave based algorithm from `wave_strategy.md` that can turn OHL
   * Milestone 1 is complete and pushed to `origin/main` at commit `c85bba7`.
   * Milestone 2 is complete and pushed to `origin/main` at commit `4b0b086`.
   * Milestone 3 is complete at commit `9a439f5`.
-  * Start Milestone 4 implementation now.
-  * Milestone 4 focuses on optional lower-timeframe entry confirmation and CLI/report diagnostics for confirmed vs unconfirmed backtests.
+  * Milestone 4 is complete and pushed to `origin/main` at commit `81b9d2e`.
+  * Next implementation step is real-data validation/tuning once BTC/ETH/SOL 1h, 4h/daily, and optional 15m Parquet files are available.
 * Second implementation milestone:
   * Add a local OHLCV loader for `data/ohlcv/{symbol}_{timeframe}.parquet`.
   * Validate required schema: `timestamp`, `open`, `high`, `low`, `close`, `volume`.
